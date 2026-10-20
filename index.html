@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hand Landmark Detection</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Segoe UI', sans-serif;
+      color: #fff;
+    }
+    h1 {
+      margin-bottom: 16px;
+      font-size: 1.4rem;
+      font-weight: 300;
+      letter-spacing: 2px;
+      color: #aaa;
+    }
+    #container {
+      position: relative;
+      width: 640px;
+      height: 480px;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 0 40px rgba(0,200,255,0.15);
+      background: #111;
+    }
+    video {
+      display: none;
+    }
+    #drawCanvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 640px;
+      height: 480px;
+      z-index: 1;
+    }
+    #canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 640px;
+      height: 480px;
+      z-index: 2;
+    }
+    #status {
+      margin-top: 12px;
+      font-size: 0.85rem;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+  <h1>✋ HAND SKETCH</h1>
+  <div id="container">
+    <video id="webcam" autoplay playsinline></video>
+    <canvas id="drawCanvas" width="640" height="480"></canvas>
+    <canvas id="canvas" width="640" height="480"></canvas>
+  </div>
+  <p id="status">로딩 중...</p>
+  <p id="gesture" style="margin-top:6px; font-size:1rem; color:#FF2D87; min-height:1.4em;"></p>
+
+  <script type="module">
+    import { HandLandmarker, FilesetResolver } from
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs";
+
+    const video = document.getElementById("webcam");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const drawCanvas = document.getElementById("drawCanvas");
+    const drawCtx = drawCanvas.getContext("2d");
+    const statusEl = document.getElementById("status");
+    const gestureEl = document.getElementById("gesture");
+
+    async function init() {
+      statusEl.textContent = "모델 로딩 중...";
+
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm"
+      );
+
+      const handLandmarker = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numHands: 1
+      });
+
+      statusEl.textContent = "카메라 연결 중...";
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480, facingMode: "user" }
+      });
+      video.srcObject = stream;
+
+      await new Promise(resolve => {
+        video.onloadeddata = resolve;
+      });
+      await video.play();
+
+      statusEl.textContent = "☝️ 검지를 펴서 그리기 | ✊ 주먹으로 멈추기";
+
+      const W = canvas.width;
+      const H = canvas.height;
+      const CONNECTIONS = HandLandmarker.HAND_CONNECTIONS;
+
+      // 드로잉 상태
+      let isDrawing = false;
+      let prevX = null;
+      let prevY = null;
+
+      // 드로잉 캔버스 설정
+      drawCtx.lineCap = "round";
+      drawCtx.lineJoin = "round";
+      drawCtx.strokeStyle = "#FF2D87";
+      drawCtx.lineWidth = 15;
+
+      // 손가락이 펴져있는지 판별 (tip이 pip보다 위에 있으면 펴진 것)
+      function isFingerExtended(landmarks, tipIdx, pipIdx) {
+        return landmarks[tipIdx].y < landmarks[pipIdx].y;
+      }
+
+      function detectGesture(landmarks) {
+        const indexExtended = isFingerExtended(landmarks, 8, 6);
+        const middleExtended = isFingerExtended(landmarks, 12, 10);
+        const ringExtended = isFingerExtended(landmarks, 16, 14);
+        const pinkyExtended = isFingerExtended(landmarks, 20, 18);
+
+        // Pointing up: 검지만 펴져 있음
+        if (indexExtended && !middleExtended && !ringExtended && !pinkyExtended) {
+          return "POINTING";
+        }
+
+        // Fist: 모든 손가락이 접혀 있음
+        if (!indexExtended && !middleExtended && !ringExtended && !pinkyExtended) {
+          return "FIST";
+        }
+
+        return "OTHER";
+      }
+
+      function drawMirrored(landmarks) {
+        // 연결선
+        ctx.strokeStyle = "rgba(0, 207, 255, 0.5)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (const conn of CONNECTIONS) {
+          const a = landmarks[conn.start];
+          const b = landmarks[conn.end];
+          ctx.moveTo((1 - a.x) * W, a.y * H);
+          ctx.lineTo((1 - b.x) * W, b.y * H);
+        }
+        ctx.stroke();
+
+        // 랜드마크 포인트
+        for (let i = 0; i < landmarks.length; i++) {
+          const pt = landmarks[i];
+          const x = (1 - pt.x) * W;
+          const y = pt.y * H;
+          ctx.beginPath();
+          ctx.arc(x, y, i === 8 ? 7 : 4, 0, Math.PI * 2);
+          ctx.fillStyle = i === 8 ? "#FF2D87" : "rgba(255,45,135,0.5)";
+          ctx.fill();
+        }
+      }
+
+      let lastTimestamp = -1;
+
+      function detect() {
+        if (video.readyState >= 2) {
+          const now = performance.now();
+          if (now > lastTimestamp) {
+            lastTimestamp = now;
+            const result = handLandmarker.detectForVideo(video, now);
+
+            ctx.clearRect(0, 0, W, H);
+
+            if (result.landmarks && result.landmarks.length > 0) {
+              const landmarks = result.landmarks[0];
+              drawMirrored(landmarks);
+
+              const gesture = detectGesture(landmarks);
+
+              if (gesture === "POINTING") {
+                const tipX = (1 - landmarks[8].x) * W;
+                const tipY = landmarks[8].y * H;
+
+                if (isDrawing && prevX !== null) {
+                  drawCtx.beginPath();
+                  drawCtx.moveTo(prevX, prevY);
+                  drawCtx.lineTo(tipX, tipY);
+                  drawCtx.stroke();
+                }
+
+                prevX = tipX;
+                prevY = tipY;
+                isDrawing = true;
+                gestureEl.textContent = "✏️ 그리는 중...";
+              } else if (gesture === "FIST") {
+                isDrawing = false;
+                prevX = null;
+                prevY = null;
+                gestureEl.textContent = "✊ 멈춤";
+              } else {
+                isDrawing = false;
+                prevX = null;
+                prevY = null;
+                gestureEl.textContent = "";
+              }
+            } else {
+              isDrawing = false;
+              prevX = null;
+              prevY = null;
+              gestureEl.textContent = "";
+            }
+          }
+        }
+        requestAnimationFrame(detect);
+      }
+
+      detect();
+    }
+
+    init().catch(err => {
+      document.getElementById("status").textContent = "오류: " + err.message;
+      console.error(err);
+    });
+  </script>
+</body>
+</html>
